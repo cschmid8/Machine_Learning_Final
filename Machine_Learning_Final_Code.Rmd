@@ -1,0 +1,395 @@
+---
+title: "Final Project"
+output: html_document
+date: "2024-10-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load hoopR package
+```{r}
+#install.packages("hoopR")
+library("hoopR")
+```
+
+Load shot data, train & test
+```{r}
+test.data <- load_nba_pbp(
+  seasons = 2024,
+  dbConnection = NULL,
+  tablename = NULL
+)
+
+#Set the 2024 season as the test set
+
+test.data <- subset(test.data, shooting_play == TRUE)
+
+#Only shooting plays
+
+train.data <- load_nba_pbp(
+  seasons = c(2022, 2023),
+  dbConnection = NULL,
+  tablename = NULL
+)
+
+train.data <- subset(train.data, shooting_play == TRUE)
+
+#Set 2022 and 2023 as training data
+```
+
+
+First look at training data.
+```{r}
+summary(train.data)
+```
+
+
+
+Creating Subsets for made shots and shots in the last two minutes of the game.
+```{r}
+last_two_minutes_data <- subset(train.data, end_game_seconds_remaining <= 120)
+last_two_minutes_data_make <- subset(last_two_minutes_data, scoring_play == TRUE)
+summary(last_two_minutes_data_make)
+
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(last_two_minutes_data_make, aes(x = end_game_seconds_remaining)) +
+  geom_histogram(binwidth = 10, fill = "blue", color = "black",boundary = 0) +
+  labs(title = "Made shots by End Game Seconds Remaining", 
+       x = "Seconds Remaining", 
+       y = "Frequency") +
+  theme_minimal()+
+  theme(panel.grid = element_blank())
+
+```
+
+```{r}
+ggplot(last_two_minutes_data_make, aes(x = coordinate_x_raw, y = coordinate_y_raw)) +
+  stat_bin2d(bins = 50, aes(fill = ..count..)) +  # Use stat_bin2d for binning
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Heatmap of Made Shots in the Last Two Minutes",
+       x = "X Coordinate",
+       y = "Y Coordinate",
+       fill = "Made Shots Frequency") +
+  theme_minimal()
+```
+
+
+
+Remove columns that have a significant amount of missing values.
+```{r}
+library(dplyr)
+
+train.data <- train.data %>%
+  select(-team_id, -home_timeout_called, -away_timeout_called, -lead_half, -lag_half, -lead_game_half, -lag_game_half, -athlete_id_2, -athlete_id_3, -score_value)
+
+test.data <- test.data %>%
+  select(-team_id, -home_timeout_called, -away_timeout_called, -lead_half, -lag_half, -athlete_id_2, -athlete_id_3, -score_value)
+```
+
+
+Remove character variables
+```{r}
+train.data <- train.data %>%
+  select_if(~ !is.character(.))
+
+test.data <- test.data %>%
+  select_if(~ !is.character(.))
+```
+
+
+Set scoring play (true or false) as a factor
+```{r}
+train.data$scoring_play <- as.factor(train.data$scoring_play)
+test.data$scoring_play <- as.factor(test.data$scoring_play)
+```
+
+
+Finally remove any rows that contain missing values.
+```{r}
+train.data <- na.omit(train.data)
+test.data <- na.omit(test.data)
+```
+
+Load required packages for modeling
+```{r}
+library(randomForest)
+library(rpart) 
+library(caret) 
+```
+
+
+Model 1: Decision Tree
+```{r}
+tree_model <- rpart(scoring_play ~., # Set tree formula
+                data = train.data) # Set dataset
+
+
+```
+
+
+Predict Decision Tree
+```{r}
+tree_preds <- predict(tree_model, test.data, type = "class")
+```
+
+Check accuracy of Decision Tree
+```{r}
+t <- table(tree_preds,test.data$scoring_play) # Create table
+confusionMatrix(t, positive = "TRUE")
+```
+The decisionn tree succefully predicted the outcome of 64.48% of shots.
+
+Now check wether players were being over or under predicted.
+
+```{r}
+test.data$predicted <- tree_preds
+
+# Step 3: Calculate actual and predicted shooting percentages for each player
+library(dplyr)
+
+performance_comparison <- test.data %>%
+  group_by(athlete_id_1) %>%  # Assuming `player_id` is your player identifier
+  summarise(
+    actual_make_rate = mean(scoring_play == "TRUE"),  # Actual make percentage
+    predicted_make_rate = mean(tree_preds == "TRUE")   # Predicted make percentage
+  ) %>%
+  mutate(outperformance = actual_make_rate - predicted_make_rate)  # Calculate the difference
+
+# Step 4: Sort players by outperformance
+performance_comparison <- performance_comparison %>%
+  arrange(desc(outperformance))
+
+# Step 5: Display players who outperformed their predictions
+print(performance_comparison)
+```
+
+
+Model 2: Bagging w/ Random Forest
+
+```{r}
+set.seed(99999) 
+bag_mod <- randomForest(scoring_play ~., 
+                data = train.data, 
+                mtry = 35,  
+                ntree = 200) 
+bag_mod
+```
+Prediction using Bagging Model
+```{r}
+bag_preds <- predict(bag_mod, test.data) # Create predictions for bagging model
+
+t <- table(bag_preds,test.data$scoring_play) # Create confusion matrix
+confusionMatrix(t,  positive = "TRUE")
+```
+The bagging model had an accuracy of 0.7627, much higher than the decesion tree.
+
+
+Now time to test on "clutch moments"
+```{r}
+test.clutch <- subset(test.data, end_game_seconds_remaining <= 300 & abs(home_score - away_score) <= 10)
+#Clutch moment #1, 5 minutes remaining, point differential of 10 or less
+```
+
+
+```{r}
+bag_preds_clutch <- predict(bag_mod, test.clutch) # Create predictions for bagging model tested on clutch moment
+
+t <- table(bag_preds_clutch,test.clutch$scoring_play) 
+confusionMatrix(t,  positive = "TRUE")
+```
+See overperformance for all NBA players
+
+```{r}
+test.clutch$predicted <- bag_preds_clutch
+
+# Step 3: Calculate actual and predicted shooting percentages for each player
+library(dplyr)
+
+performance_comparison <- test.clutch %>%
+  group_by(athlete_id_1) %>%  # Assuming `player_id` is your player identifier
+  summarise(
+    actual_make_rate = mean(scoring_play == "TRUE"),  # Actual make percentage
+    predicted_make_rate = mean(bag_preds_clutch == "TRUE")   # Predicted make percentage
+  ) %>%
+  mutate(outperformance = actual_make_rate - predicted_make_rate)  # Calculate the difference
+
+# Step 4: Sort players by outperformance
+performance_comparison <- performance_comparison %>%
+  arrange(desc(outperformance))
+
+# Step 5: Display players who outperformed their predictions
+print(performance_comparison)
+```
+
+Load player data
+```{r}
+player.data <- load_nba_player_box(
+  seasons = 2024,
+  dbConnection = NULL,
+  tablename = NULL
+)
+
+player.data
+```
+
+Filter fir 2024 U.S olympic Roster
+```{r}
+# List of US Olympic roster player names 
+us_olympic_roster <- c("Bam Adebayo", "Devin Booker", "Stephen Curry", "Anthony Davis", "Kevin Durant", "Anthony Edwards", "Joel Embiid", "Tyrese Haliburton", "Jrue Holiday", "LeBron James", "Jayson Tatum", "Derrick White")  
+
+# Filter the player.data for players on the US Olympic roster
+us_olympic_players <- player.data %>%
+  filter(athlete_display_name %in% us_olympic_roster) %>%  # Filter for only Olympic players
+  select(athlete_display_name, athlete_id)  
+
+# View the filtered Olympic players with their IDs, showing only distinct values
+print(distinct(us_olympic_players))
+```
+
+
+Now filter our outperformance data by the Olympic Roster
+```{r}
+us_olympic_ids <- us_olympic_players$athlete_id
+
+performance_comparison_filtered <- performance_comparison %>%
+  filter(athlete_id_1 %in% us_olympic_ids)
+
+print(performance_comparison_filtered)
+```
+
+```{r}
+library(ggplot2)
+
+# Create a bar plot to show outperformance for each player
+ggplot(performance_comparison_filtered, aes(x = reorder(athlete_id_1, outperformance), y = outperformance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  # Flip the axis for easier reading of player names
+  labs(x = "Player ID", y = "Outperformance (Actual - Predicted)", 
+       title = "Outperformance of US Olympic Players") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Test on clutch moment number 2
+```{r}
+test.clutcher <- subset(test.data, end_game_seconds_remaining <= 180 & abs(home_score - away_score) <= 8)
+```
+
+```{r}
+bag_preds_clutcher <- predict(bag_mod, test.clutcher) # Create predictions for bagging model
+
+t <- table(bag_preds_clutcher,test.clutcher$scoring_play) # Create table
+confusionMatrix(t,  positive = "TRUE")
+```
+```{r}
+test.clutcher$predicted <- bag_preds_clutcher
+
+library(dplyr)
+
+performance_comparison <- test.clutcher %>%
+  group_by(athlete_id_1) %>%  
+  summarise(
+    actual_make_rate = mean(scoring_play == "TRUE"),  
+    predicted_make_rate = mean(bag_preds_clutcher == "TRUE")   
+  ) %>%
+  mutate(outperformance = actual_make_rate - predicted_make_rate)  
+
+
+performance_comparisoner <- performance_comparison %>%
+  arrange(desc(outperformance))
+
+
+print(performance_comparisoner)
+```
+```{r}
+performance_comparisoner_filtered <- performance_comparisoner %>%
+  filter(athlete_id_1 %in% us_olympic_ids)
+
+print(performance_comparisoner_filtered)
+```
+```{r}
+
+ggplot(performance_comparisoner_filtered, aes(x = reorder(athlete_id_1, outperformance), y = outperformance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  
+  labs(x = "Player ID", y = "Outperformance (Actual - Predicted)", 
+       title = "Outperformance of US Olympic Players") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Test for third clutch moment
+
+```{r}
+test.end <- subset(test.data, end_game_seconds_remaining <= 45 & abs(home_score - away_score) <= 6)
+```
+
+```{r}
+bag_preds_end <- predict(bag_mod, test.end) 
+
+t <- table(bag_preds_end,test.end$scoring_play) 
+confusionMatrix(t,  positive = "TRUE")
+```
+
+```{r}
+test.end$predicted <- bag_preds_end
+
+library(dplyr)
+
+performance_comparison <- test.end %>%
+  group_by(athlete_id_1) %>%  
+  summarise(
+    actual_make_rate = mean(scoring_play == "TRUE"),  
+    predicted_make_rate = mean(bag_preds_end == "TRUE")   
+  ) %>%
+  mutate(outperformance = actual_make_rate - predicted_make_rate)  
+
+
+performance_comparison_end <- performance_comparison %>%
+  arrange(desc(outperformance))
+
+
+print(performance_comparison_end)
+```
+
+```{r}
+performance_comparison_end_filtered <- performance_comparison_end %>%
+  filter(athlete_id_1 %in% us_olympic_ids)
+
+print(performance_comparison_end_filtered)
+```
+```{r}
+ggplot(performance_comparison_end_filtered, aes(x = reorder(athlete_id_1, outperformance), y = outperformance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  
+  labs(x = "Player ID", y = "Outperformance (Actual - Predicted)", 
+       title = "Outperformance of US Olympic Players") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+importance_matrix <- randomForest::importance(bag_mod)
+importance_matrix
+```
+
+```{r}
+varImpPlot(bag_mod, type =2, n.var = 10)
+```
+
+Checking the importance of each variable.
+
+It seems like where the shot is taken, who took it, how much time is left, and point differential are what matters most.  This bodes well since this is what constitutes a clutch moment.
+
+
+
+
+
+
+
+
+
